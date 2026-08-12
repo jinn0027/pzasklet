@@ -4,11 +4,19 @@ make
 
 * system0の起動方法
 
-python system0.py
+  python system0.py
 
 * system1の起動方法
 
-(1) ./s.shでapptainer containerに入る。
-(2) apptainer> python system1.py　で実行する
-(3) exit
+[事前準備]
+  apptainerの設定
+  無い場合にはこんな感じでローカルにインストールできる。
+
+  if ! (type "apptainer" > /dev/null 2>&1); then
+    curl -s https://raw.githubusercontent.com/apptainer/apptainer/main/tools/install-unprivileged.sh | bash -s - ~
+  fi
+
+  (1) ./s.shでapptainer containerに入る。
+  (2) apptainer> python system1.py　で実行する
+  (3) exit
 
