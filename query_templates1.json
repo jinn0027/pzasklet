@@ -13,13 +13,13 @@
   },
   {
     "id": "instructor_to_courses",
-    "menu_name": "先生の名前から授業を検索",
-    "question": "[INSTRUCTOR_NAME] 先生が担当している授業を教えてください。",
-    "sql": "SELECT DISTINCT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.last_name = '[INSTRUCTOR_NAME]'",
+    "menu_name": "先生のIDから授業を検索",
+    "question": "ID: [USER_ID] の先生が担当している授業を教えてください。",
+    "sql": "SELECT DISTINCT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.user_id = '[USER_ID]'",
     "slots": {
-      "INSTRUCTOR_NAME": {
+      "USER_ID": {
         "data_type": "VARCHAR",
-        "table_column": "User.last_name"
+        "table_column": "User.user_id"
       }
     }
   },
