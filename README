@@ -1,0 +1,14 @@
+* csvファイルの作成方法
+
+make
+
+* system0の起動方法
+
+python system0.py
+
+* system1の起動方法
+
+(1) ./s.shでapptainer containerに入る。
+(2) apptainer> python system1.py　で実行する
+(3) exit
+
