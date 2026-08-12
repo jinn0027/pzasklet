@@ -191,6 +191,7 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
                         if s_selected_idx == -1:
                             continue
                         selected_item = similar_results[s_selected_idx]
+                        # 選択された新しい授業に対して、全授業一覧から選んだときと同様にメニューから開始する
                         inspect_course(conn, template_dict, selected_item['course_id'], selected_item['title'], normalizer)
                         return
                     except (ValueError, KeyError, IndexError):
@@ -227,6 +228,7 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
                                 if s_selected_idx == -1:
                                     continue
                                 selected_sim_row = similar_res.reset_index(drop=True).loc[s_selected_idx]
+                                # 選択された新しい授業に対して、同様にメニューから開始する
                                 inspect_course(conn, template_dict, selected_sim_row['course_id'], selected_sim_row['title'], normalizer)
                                 return
                             except (ValueError, KeyError):
