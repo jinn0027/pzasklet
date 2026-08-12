@@ -1,0 +1,54 @@
+[
+  {
+    "id": "course_by_id",
+    "menu_name": "授業IDから詳細を検索",
+    "question": "ID: [COURSE_ID] の授業について教えてください。",
+    "sql": "SELECT title FROM Course WHERE course_id = '[COURSE_ID]'",
+    "slots": {
+      "COURSE_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course.course_id"
+      }
+    }
+  },
+  {
+    "id": "instructor_to_courses",
+    "menu_name": "先生の名前から授業を検索",
+    "question": "[INSTRUCTOR_NAME] 先生が担当している授業を教えてください。",
+    "sql": "SELECT DISTINCT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.last_name = '[INSTRUCTOR_NAME]'",
+    "slots": {
+      "INSTRUCTOR_NAME": {
+        "data_type": "VARCHAR",
+        "table_column": "User.last_name"
+      }
+    }
+  },
+  {
+    "id": "schedule_to_courses",
+    "menu_name": "日時（曜日・時限）から授業を検索",
+    "question": "[DAY_OF_WEEK] の [PERIOD]限に行われる授業を教えてください。",
+    "sql": "SELECT DISTINCT C.course_id, C.title FROM Course_Schedule S JOIN Course C ON S.course_id = C.course_id WHERE S.day_of_week = '[DAY_OF_WEEK]' AND S.period = [PERIOD]",
+    "slots": {
+      "DAY_OF_WEEK": {
+        "data_type": "VARCHAR",
+        "table_column": "Course_Schedule.day_of_week"
+      },
+      "PERIOD": {
+        "data_type": "INTEGER",
+        "table_column": "Course_Schedule.period"
+      }
+    }
+  },
+  {
+    "id": "room_to_courses",
+    "menu_name": "場所（教室）から授業を検索",
+    "question": "[ROOM_ID] で行われる授業を教えてください。",
+    "sql": "SELECT DISTINCT C.course_id, C.title FROM Course_Schedule S JOIN Course C ON S.course_id = C.course_id WHERE S.room_id = '[ROOM_ID]'",
+    "slots": {
+      "ROOM_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course_Schedule.room_id"
+      }
+    }
+  }
+]

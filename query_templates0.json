@@ -1,0 +1,50 @@
+[
+  {
+    "id": "instructor",
+    "menu_name": "担当の先生",
+    "question": "ID: [COURSE_ID] の授業の担当教員を教えてください。",
+    "sql": "SELECT U.last_name, U.first_name FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE C.course_id = '[COURSE_ID]'",
+    "slots": {
+      "COURSE_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course.course_id"
+      }
+    }
+  },
+  {
+    "id": "schedule",
+    "menu_name": "日時（曜日・時限）",
+    "question": "ID: [COURSE_ID] の授業はいつ行われますか？",
+    "sql": "SELECT day_of_week, period FROM Course_Schedule WHERE course_id = '[COURSE_ID]'",
+    "slots": {
+      "COURSE_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course_Schedule.course_id"
+      }
+    }
+  },
+  {
+    "id": "room",
+    "menu_name": "場所（教室・建物）",
+    "question": "ID: [COURSE_ID] の授業の教室（場所）を教えてください。",
+    "sql": "SELECT DISTINCT R.building_name, R.room_id FROM Course_Schedule S JOIN Room R ON S.room_id = R.room_id WHERE S.course_id = '[COURSE_ID]'",
+    "slots": {
+      "COURSE_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course_Schedule.course_id"
+      }
+    }
+  },
+  {
+    "id": "content",
+    "menu_name": "内容（テーマ・概要）",
+    "question": "ID: [COURSE_ID] の授業内容やテーマについて教えてください。",
+    "sql": "SELECT theme, class_abstract FROM Course WHERE course_id = '[COURSE_ID]'",
+    "slots": {
+      "COURSE_ID": {
+        "data_type": "VARCHAR",
+        "table_column": "Course.course_id"
+      }
+    }
+  }
+]
