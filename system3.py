@@ -12,17 +12,23 @@ class CourseSimilarityNormalizer:
     SentenceTransformer（GLuCoSE-base-ja-v2など）を使用して、
     授業のテキスト（テーマ・概要）の埋め込み生成・コサイン類似度検索を行うクラスです。
     """
-    def __init__(self, model_path: str = "/opt/models/pkshatech/GLuCoSE-base-ja-v2"):
+    def __init__(self, model_path: str = "/opt/models/pkshatech/GLuCoSE-base-ja-v2", device: Optional[str] = None):
         self.model_path = model_path
+        self.device = device
         self.model = None
         self.courses_df = None
         self.course_embeddings = None
         
+        # 💡 SentenceTransformerの初期化時にデバイスが指定されていれば渡す
+        load_kwargs = {}
+        if self.device:
+            load_kwargs["device"] = self.device
+
         try:
-            self.model = SentenceTransformer(self.model_path)
+            self.model = SentenceTransformer(self.model_path, **load_kwargs)
         except Exception as e:
             try:
-                self.model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+                self.model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2", **load_kwargs)
             except Exception as e2:
                 raise RuntimeError(f"致命的なエラー: 埋め込みモデルのロードに失敗しました。パス: {model_path}, 詳細: {e} / {e2}") from e2
 
@@ -110,7 +116,6 @@ def init_db():
     return conn
 
 def render_template(template_entry: dict, slots: dict) -> tuple[str, str]:
-    """テンプレートの質問文とSQLのプレースホルダーをスロット値で置換する"""
     q = template_entry["question"]
     sql = template_entry["sql"]
     for key, val in slots.items():
@@ -120,7 +125,6 @@ def render_template(template_entry: dict, slots: dict) -> tuple[str, str]:
     return q, sql
 
 def inspect_course(conn, template_dict, target_course_id, target_title, normalizer):
-    """特定の授業に対する検索と、その後のアクションを処理する関数"""
     while True:
         print(f"\n選択された授業: {target_title} ({target_course_id})")
 
@@ -193,7 +197,6 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
         else:
             print(res.to_string(index=False))
 
-        # アクション選択ループ（統合メニュー）
         while True:
             print("\n次のアクションを選んでください:")
             print("1. 担当の先生")
@@ -320,7 +323,6 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
                 print("無効な選択です。もう一度入力してください。")
 
 def select_course_from_list(conn, template_dict, normalizer, courses_df):
-    """指定された授業のDataFrameから授業を選択させ、詳細画面へ進む関数"""
     if courses_df.empty:
         print("該当する授業がありません。")
         return
@@ -353,20 +355,24 @@ def main():
     conn = init_db()
     print("--- 授業情報検索システム (pzasklet 統合版) ---")
     
-    # 1. LLM用のモデルパスを取得・定義
+    # 💡 使用するデバイス名を指定（例: 環境変数や直接指定、未指定の場合はNoneで自動選択）
+    target_device = os.environ.get("TARGET_DEVICE", None) # 例: "sc3" や "cuda" など
+    
     model_path = os.environ.get("AVAILABLE_MODEL_PATH", "/opt/models/Qwen/Qwen3-4B-Instruct-2507")
     
-    # 2. 自然言語検索エンジンのインスタンス化（DBとテンプレート、モデルパスを共有）
+    # 1. 自然言語検索エンジンにデバイスを渡す
     nl_engine = NaturalLanguageSearchEngine(
         conn=conn, 
         template_dict=template_dict, 
-        model_path=model_path
+        model_path=model_path,
+        device="cpu"
     )
 
     embed_model_path = os.environ.get("EMBEDDING_MODEL_PATH", "/opt/models/pkshatech/GLuCoSE-base-ja-v2")
     print(f"埋め込みモデル ({embed_model_path}) をロードし、授業テキストのベクトルを生成中...")
     try:
-        normalizer = CourseSimilarityNormalizer(model_path=embed_model_path)
+        # 2. 類似度ノーマライザーにもデバイスを渡す
+        normalizer = CourseSimilarityNormalizer(model_path=embed_model_path, device=target_device)
         normalizer.build_course_embeddings(conn)
         print("準備完了しました。\n")
     except Exception as e:

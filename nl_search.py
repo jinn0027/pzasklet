@@ -13,17 +13,19 @@ class NaturalLanguageSearchEngine:
         template_dict: Union[List[Dict[str, Any]], Dict[str, Any]] = None,
         model_path: str = "/opt/models/Qwen/Qwen3-4B-Instruct-2507", 
         log_file: str = "failed_queries.jsonl",
+        device: Optional[str] = None,  # 💡 将来の拡張用に引数は保持しておく
         **kwargs
     ):
         self.conn = conn
         self.log_file = log_file
+        self.device = device
         
         target = templates if templates is not None else template_dict
         if target is None:
             raise ValueError("テンプレートを指定してください。")
         self.template_dict = self._normalize_to_dict(target)
         
-        print(f"🔄 自然言語検索エンジン用 LLMをロード中... (モデル: {model_path})")
+        print(f"🔄 自然言語検索エンジン用 LLMをロード中... (モデル: {model_path}, デバイス: {self.device or '自動'})")
         self.llm, self.sampling_params = self._init_vllm(model_path)
         print("✅ 自然言語検索エンジンのLLM準備完了")
 
@@ -45,6 +47,8 @@ class NaturalLanguageSearchEngine:
 
     def _init_vllm(self, model_path: str):
         from vllm import LLM, SamplingParams
+        
+        # 💡 vLLMは device 引数をサポートしていないため、環境側の自動検出に任せて標準引数のみで初期化する
         llm = LLM(
             model=model_path,
             trust_remote_code=True,
