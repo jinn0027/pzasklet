@@ -1,0 +1,27 @@
+[
+  {
+    "id": "instructor_to_courses",
+    "question": "[INSTRUCTOR_NAME] 先生の授業を教えて",
+    "sql": "SELECT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.user_id = '[USER_ID]'"
+  },
+  {
+    "id": "instructor_to_schedule",
+    "question": "[INSTRUCTOR_NAME] 先生の授業はいつですか？",
+    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id WHERE U.user_id = '[USER_ID]'"
+  },
+  {
+    "id": "instructor_to_room",
+    "question": "[INSTRUCTOR_NAME] 先生の授業の教室はどこですか？",
+    "sql": "SELECT C.course_id, C.title, R.building_name, R.room_id FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id JOIN Room AS R ON S.room_id = R.room_id WHERE U.user_id = '[USER_ID]'"
+  },
+  {
+    "id": "schedule_to_courses",
+    "question": "[DAY_OF_WEEK]曜日の[PERIOD]限の授業は何ですか？",
+    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period, R.room_id FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id JOIN Room R ON S.room_id = R.room_id WHERE S.day_of_week = '[DAY_OF_WEEK]' AND S.period = [PERIOD]"
+  },
+  {
+    "id": "room_to_courses",
+    "question": "[ROOM_ID] 教室で行われる授業を教えて",
+    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id WHERE S.room_id = '[ROOM_ID]'"
+  }
+]

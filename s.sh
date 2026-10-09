@@ -6,8 +6,18 @@ SIF=${MOD}.sif
 
 SINGULARITY=apptainer
 
-#MODEL_DIR=/home/kanazawa/models
-MODEL_DIR=/mnt/pool3/scratch/ishikawa/models
+id=${1-"3"}
+pyfile="system${id}.py"
+
+MODEL_DIR=/home/kanazawa/models
+if [ ! -d ${MODEL_DIR} ] ; then
+    MODEL_DIR=/mnt/pool3/scratch/ishikawa/models
+    if [ ! -d ${MODEL_DIR} ] ; then
+	echo "Error : MODEL_DIR does not exist"
+	exit -1
+    fi
+fi
+
 
 ${SINGULARITY} -q exec --no-home \
                --bind ${MODEL_DIR}:/opt/models \
@@ -15,6 +25,6 @@ ${SINGULARITY} -q exec --no-home \
                --pwd /opt/work \
                --writable-tmpfs \
                ${SIF} bash -c \
-               "export HF_HOME=/opt/work/hf_cache && pip uninstall -y torchaudio && python /opt/work/system1.py"
+               "export HF_HOME=/opt/work/hf_cache && pip uninstall -y torchaudio && python /opt/work/system${id}.py"
 
 

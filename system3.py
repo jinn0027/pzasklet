@@ -93,7 +93,7 @@ class CourseSimilarityNormalizer:
         return results[:k]
 
 
-def load_templates(json_path="query_templates1.json"):
+def load_templates(json_path="query_templates3.json"):
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"テンプレートファイル '{json_path}' が見つかりません。")
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -344,22 +344,29 @@ def select_course_from_list(conn, template_dict, normalizer, courses_df):
 
 def main():
     try:
-        query_templates = load_templates("query_templates1.json")
+        query_templates = load_templates("query_templates3.json")
     except Exception as e:
         print(f"エラー: {e}")
         return
 
     template_dict = {t["id"]: t for t in query_templates}
     conn = init_db()
-    print("--- 授業情報検索システム1 (pzasklet) ---")
+    print("--- 授業情報検索システム (pzasklet 統合版) ---")
     
-    # 自然言語検索エンジンのインスタンス化
-    nl_engine = NaturalLanguageSearchEngine(conn=conn, template_dict=template_dict)
+    # 1. LLM用のモデルパスを取得・定義
+    model_path = os.environ.get("AVAILABLE_MODEL_PATH", "/opt/models/Qwen/Qwen3-4B-Instruct-2507")
+    
+    # 2. 自然言語検索エンジンのインスタンス化（DBとテンプレート、モデルパスを共有）
+    nl_engine = NaturalLanguageSearchEngine(
+        conn=conn, 
+        template_dict=template_dict, 
+        model_path=model_path
+    )
 
-    model_path = os.environ.get("EMBEDDING_MODEL_PATH", "/opt/models/pkshatech/GLuCoSE-base-ja-v2")
-    print(f"埋め込みモデル ({model_path}) をロードし、授業テキストのベクトルを生成中...")
+    embed_model_path = os.environ.get("EMBEDDING_MODEL_PATH", "/opt/models/pkshatech/GLuCoSE-base-ja-v2")
+    print(f"埋め込みモデル ({embed_model_path}) をロードし、授業テキストのベクトルを生成中...")
     try:
-        normalizer = CourseSimilarityNormalizer(model_path=model_path)
+        normalizer = CourseSimilarityNormalizer(model_path=embed_model_path)
         normalizer.build_course_embeddings(conn)
         print("準備完了しました。\n")
     except Exception as e:
