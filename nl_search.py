@@ -13,7 +13,7 @@ class NaturalLanguageSearchEngine:
         template_dict: Union[List[Dict[str, Any]], Dict[str, Any]] = None,
         model_path: str = "/opt/models/Qwen/Qwen3-4B-Instruct-2507", 
         log_file: str = "failed_queries.jsonl",
-        device: Optional[str] = None,  # 💡 将来の拡張用に引数は保持しておく
+        device: Optional[str] = None,  # 将来の拡張・インターフェース保持用
         **kwargs
     ):
         self.conn = conn
@@ -48,7 +48,7 @@ class NaturalLanguageSearchEngine:
     def _init_vllm(self, model_path: str):
         from vllm import LLM, SamplingParams
         
-        # 💡 vLLMは device 引数をサポートしていないため、環境側の自動検出に任せて標準引数のみで初期化する
+        # vLLMはデバイス引数を取らないため環境側の自動検出に任せる
         llm = LLM(
             model=model_path,
             trust_remote_code=True,
@@ -56,7 +56,7 @@ class NaturalLanguageSearchEngine:
         )
         sampling_params = SamplingParams(
             temperature=0.0,
-            max_tokens=64,
+            max_tokens=128,
             seed=42
         )
         return llm, sampling_params
@@ -74,83 +74,114 @@ class NaturalLanguageSearchEngine:
         except Exception as e:
             print(f"[警告] 失敗ログの書き込みに失敗しました: {e}")
 
-    def _llm_select_instructor(self, user_query: str, instructors_df: pd.DataFrame) -> Optional[str]:
-        """LLMを使って、教員名リストの中からユーザーの質問（日英対応・表記ゆれ対応）に最も合致するものを選択する"""
-        if instructors_df.empty:
-            return None
-            
-        instructor_names = instructors_df['last_name'].tolist()
-        
+    def _parse_query_with_llm(self, user_query: str) -> Dict[str, Any]:
+        """
+        プロンプトに個人名を一切載せず、意味（抽出ルール）だけでLLMに条件を解析させる
+        """
         prompt = (
-            "以下のユーザーの質問（日本語または英語）に含まれている、または意図されている教員名を、候補リストの中から1つだけ選んでください。\n"
-            "※注意: 候補リストは漢字（例: 八柳）ですが、ユーザーの質問には英語のローマ字（例: yatuyanagi）、ひらがな、カタカナで書かれている場合があります。\n"
-            "言語や表記が異なっていても、同一人物を指していると推測できる場合は、候補リストに含まれる正確な漢字の名称を1つだけ出力してください。\n"
-            "該当するものが全くない場合は「なし」とだけ出力してください。余計な説明や理由、文字は一切含めないこと。\n\n"
-            f"ユーザーの質問: {user_query}\n"
-            f"教員名の候補: {instructor_names}\n\n"
-            "選択された教員名:"
+            "あなたは大学の授業検索システムのクエリパーサーです。\n"
+            "以下のユーザーの質問から、検索条件を分析し、JSON形式で抽出してください。\n\n"
+            "【抽出するキー】\n"
+            "- instructor: 教員の名前、名字、またはそのローマ字・よみがな（例: 'yatsuyanagi', '八柳'）。ない場合は null。\n"
+            "- day_of_week: 曜日（月、火、水、木、金、土、日）。ない場合は null。\n"
+            "- period: 時限の数字（1〜5）。ない場合は null。\n"
+            "- target_info: 知りたい情報（'schedule'=日時, 'room'=場所, 'courses'=担当授業一覧, 'general'=指定なし）。\n\n"
+            f"ユーザーの質問: {user_query}\n\n"
+            "出力には必ず以下のJSONフォーマットを1回だけ含めてください。\n"
+            "{\"instructor\": null, \"day_of_week\": null, \"period\": null, \"target_info\": \"general\"}"
         )
         
         try:
             outputs = self.llm.generate([prompt], self.sampling_params)
             raw_output = outputs[0].outputs[0].text.strip()
-            print(f"\n[DEBUG] LLMの出力: {raw_output}")
+            print(f"\n[DEBUG] LLMの出力:\n{raw_output}")
             
-            selected_name = raw_output.strip("「」『』\"'。. ")
+            # 💡 最初の '{' から対応する閉じ括弧 '}' までを正確に追跡して最初のJSONオブジェクトのみを抽出
+            start_idx = raw_output.find('{')
+            if start_idx == -1:
+                return {}
+                
+            depth = 0
+            in_string = False
+            escape = False
+            end_idx = -1
             
-            if selected_name == "なし" or not selected_name:
-                return None
-
-            matched_name = None
-            if selected_name in instructor_names:
-                matched_name = selected_name
-            else:
-                for name in instructor_names:
-                    if name in selected_name or selected_name in name:
-                        matched_name = name
-                        break
+            for i in range(start_idx, len(raw_output)):
+                char = raw_output[i]
+                if escape:
+                    escape = False
+                    continue
+                if char == '\\' and in_string:
+                    escape = True
+                    continue
+                if char == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if char == '{':
+                        depth += 1
+                    elif char == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i
+                            break
             
-            if matched_name:
-                matched_row = instructors_df[instructors_df['last_name'] == matched_name]
-                if not matched_row.empty:
-                    return matched_row.iloc[0]['user_id']
-                    
+            if end_idx != -1:
+                json_str = raw_output[start_idx:end_idx + 1]
+                parsed = json.loads(json_str)
+                return parsed if isinstance(parsed, dict) else {}
+            
+            return {}
         except Exception as e:
-            print(f"[警告] LLMによる教員名選択中にエラーが発生しました: {e}")
-            
-        return None
+            print(f"[警告] LLMによるクエリ解析エラー: {e}")
+            return {}
 
     def process_query(self, user_query: str) -> Tuple[Optional[pd.DataFrame], str]:
         try:
             filled_sql = ""
-            query_lower = user_query.lower()
             
-            # 1. 先生の名前による検索の検出
-            instructor_keywords = ["先生", "教授", "担当", "dr.", "prof", "class", "teacher", "course"]
-            if any(kw in query_lower for kw in instructor_keywords) or any(name.lower() in query_lower for name in ["yatuyanagi", "八柳"]):
+            # 1. LLMに意味ベースで条件を抽出させる（個人名リストは一切プロンプトに渡さない）
+            parsed_conds = self._parse_query_with_llm(user_query)
+            
+            instructor_keyword = parsed_conds.get("instructor")
+            day_val = parsed_conds.get("day_of_week")
+            period_val = parsed_conds.get("period")
+            target_info = parsed_conds.get("target_info", "general")
+            
+            # 2. 教員名キーワードが取れた場合の汎用的なDB照合・SQL生成
+            if instructor_keyword:
                 try:
                     instructors_df = pd.read_sql("SELECT DISTINCT last_name, user_id FROM User", self.conn)
-                    uid = self._llm_select_instructor(user_query, instructors_df)
                     
-                    if uid:
-                        is_asking_when = any(w in query_lower for w in ["いつ", "曜日", "時限", "時間", "何限", "何曜", "when", "time", "schedule"])
-                        is_asking_where = any(w in query_lower for w in ["どこ", "教室", "場所", "ビル", "where", "room", "building", "class"])
+                    matched_uid = None
+                    kw_lower = str(instructor_keyword).lower()
+                    
+                    for _, row in instructors_df.iterrows():
+                        uid = str(row['user_id'])
+                        last_name = str(row['last_name']).lower()
                         
+                        # 漢字の名字の部分一致、または user_id のパーツ（ローマ字等）への部分一致を汎用的にチェック
+                        if (last_name and last_name in kw_lower) or (kw_lower in last_name) or (kw_lower in uid.lower()):
+                            matched_uid = uid
+                            break
+                    
+                    if matched_uid:
+                        # ユーザーの質問の意図（いつ、どこ、など）に応じたテンプレート選択
                         target_tmpl_id = "instructor_to_courses"
-                        if is_asking_when:
+                        if target_info == "schedule":
                             target_tmpl_id = "instructor_to_schedule"
-                        elif is_asking_where and "when" not in query_lower:
+                        elif target_info == "room":
                             target_tmpl_id = "instructor_to_room"
-                        
+                            
                         if target_tmpl_id in self.template_dict:
-                            filled_sql = self.template_dict[target_tmpl_id]["sql"].replace("[USER_ID]", uid)
+                            filled_sql = self.template_dict[target_tmpl_id]["sql"].replace("[USER_ID]", matched_uid)
                         else:
                             if target_tmpl_id == "instructor_to_schedule":
                                 filled_sql = (
                                     f"SELECT C.course_id, C.title, S.day_of_week, S.period "
                                     f"FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id "
                                     f"JOIN Course_Schedule AS S ON C.course_id = S.course_id "
-                                    f"WHERE U.user_id = '{uid}'"
+                                    f"WHERE U.user_id = '{matched_uid}'"
                                 )
                             elif target_tmpl_id == "instructor_to_room":
                                 filled_sql = (
@@ -158,26 +189,21 @@ class NaturalLanguageSearchEngine:
                                     f"FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id "
                                     f"JOIN Course_Schedule AS S ON C.course_id = S.course_id "
                                     f"JOIN Room AS R ON S.room_id = R.room_id "
-                                    f"WHERE U.user_id = '{uid}'"
+                                    f"WHERE U.user_id = '{matched_uid}'"
                                 )
                             else:
-                                filled_sql = self.template_dict.get("instructor_to_courses", {}).get("sql", "").replace("[USER_ID]", uid)
+                                filled_sql = self.template_dict.get("instructor_to_courses", {}).get("sql", "").replace("[USER_ID]", matched_uid)
                 except Exception as db_err:
-                    print(f"[警告] DB読み込みエラー (Userテーブル): {db_err}")
+                    print(f"[警告] DB検索エラー: {db_err}")
 
-            # 2. 曜日・時限パターン
-            if not filled_sql:
-                days = ["月", "火", "水", "木", "金", "土", "日"]
-                found_day = next((d for d in days if d in user_query), None)
-                found_period = next((str(p) for p in range(1, 6) if f"{p}限" in user_query or f"{p}コマ" in user_query), None)
-                
-                if found_day and found_period:
-                    if "schedule_to_courses" in self.template_dict:
-                        filled_sql = (
-                            self.template_dict["schedule_to_courses"]["sql"]
-                            .replace("[DAY_OF_WEEK]", found_day)
-                            .replace("[PERIOD]", found_period)
-                        )
+            # 3. 曜日・時限パターンによるテンプレート充填
+            if not filled_sql and day_val and period_val:
+                if "schedule_to_courses" in self.template_dict:
+                    filled_sql = (
+                        self.template_dict["schedule_to_courses"]["sql"]
+                        .replace("[DAY_OF_WEEK]", str(day_val))
+                        .replace("[PERIOD]", str(period_val))
+                    )
 
             # ❌ 条件を特定できなかった場合のログ記録
             if not filled_sql:
