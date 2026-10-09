@@ -6,9 +6,12 @@ SIF=${MOD}.sif
 
 SINGULARITY=apptainer
 
-${SINGULARITY} shell --no-home \
-               --bind /home/kanazawa/models:/opt/models \
+#MODEL_DIR=/home/kanazawa/models
+MODEL_DIR=/mnt/pool3/scratch/ishikawa/models
+
+${SINGULARITY} -q exec --no-home \
+               --bind ${MODEL_DIR}:/opt/models \
                --bind $(pwd):/opt/work \
                --pwd /opt/work \
-               --shell /bin/bash \
-               ${SIF}
+               --writable-tmpfs \
+               ${SIF} bash -c "pip uninstall -y torchaudio && python /opt/work/system1.py"
