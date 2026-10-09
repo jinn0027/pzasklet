@@ -14,4 +14,7 @@ ${SINGULARITY} -q exec --no-home \
                --bind $(pwd):/opt/work \
                --pwd /opt/work \
                --writable-tmpfs \
-               ${SIF} bash -c "pip uninstall -y torchaudio && python /opt/work/system1.py"
+               ${SIF} bash -c \
+               "export HF_HOME=/opt/work/hf_cache && pip uninstall -y torchaudio && python /opt/work/system1.py"
+
+
