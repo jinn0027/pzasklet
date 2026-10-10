@@ -1,27 +1,59 @@
-[
-  {
-    "id": "instructor_to_courses",
-    "question": "[INSTRUCTOR_NAME] 先生の授業を教えて",
-    "sql": "SELECT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.user_id = '[USER_ID]'"
+{
+  "slots": {
+    "INSTRUCTOR_NAME": "質問文に登場する教員の名前や名字の文字列",
+    "DAY_OF_WEEK": "曜日（月, 火, 水, 木, 金, 土, 日）",
+    "PERIOD": "時限の数字（1〜5）",
+    "ROOM_ID": "教室名や部屋番号",
+    "CREDITS": "単位数の数字",
+    "FORMAT": "授業の形式（対面、オンライン、オンデマンドなど）",
+    "EVAL_ITEM": "評価方法の項目（試験、レポート、出席など）",
+    "FACULTY": "対象学部や学科の名前"
   },
-  {
-    "id": "instructor_to_schedule",
-    "question": "[INSTRUCTOR_NAME] 先生の授業はいつですか？",
-    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id WHERE U.user_id = '[USER_ID]'"
-  },
-  {
-    "id": "instructor_to_room",
-    "question": "[INSTRUCTOR_NAME] 先生の授業の教室はどこですか？",
-    "sql": "SELECT C.course_id, C.title, R.building_name, R.room_id FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id JOIN Room AS R ON S.room_id = R.room_id WHERE U.user_id = '[USER_ID]'"
-  },
-  {
-    "id": "schedule_to_courses",
-    "question": "[DAY_OF_WEEK]曜日の[PERIOD]限の授業は何ですか？",
-    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period, R.room_id FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id JOIN Room R ON S.room_id = R.room_id WHERE S.day_of_week = '[DAY_OF_WEEK]' AND S.period = [PERIOD]"
-  },
-  {
-    "id": "room_to_courses",
-    "question": "[ROOM_ID] 教室で行われる授業を教えて",
-    "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id WHERE S.room_id = '[ROOM_ID]'"
-  }
-]
+  "templates": [
+    {
+      "id": "instructor_to_courses",
+      "question": "[INSTRUCTOR_NAME] 先生の授業を教えて",
+      "sql": "SELECT C.course_id, C.title FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE U.user_id = '[USER_ID]'"
+    },
+    {
+      "id": "instructor_to_schedule",
+      "question": "[INSTRUCTOR_NAME] 先生の授業はいつですか？",
+      "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id WHERE U.user_id = '[USER_ID]'"
+    },
+    {
+      "id": "instructor_to_room",
+      "question": "[INSTRUCTOR_NAME] 先生の授業の教室はどこですか？",
+      "sql": "SELECT C.course_id, C.title, R.building_name, R.room_id FROM Course AS C JOIN User AS U ON C.user_id__instructor = U.user_id JOIN Course_Schedule AS S ON C.course_id = S.course_id JOIN Room AS R ON S.room_id = R.room_id WHERE U.user_id = '[USER_ID]'"
+    },
+    {
+      "id": "schedule_to_courses",
+      "question": "[DAY_OF_WEEK]曜日の[PERIOD]限の授業は何ですか？",
+      "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period, R.room_id FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id JOIN Room R ON S.room_id = R.room_id WHERE S.day_of_week = '[DAY_OF_WEEK]' AND S.period = [PERIOD]"
+    },
+    {
+      "id": "room_to_courses",
+      "question": "[ROOM_ID] 教室で行われる授業を教えて",
+      "sql": "SELECT C.course_id, C.title, S.day_of_week, S.period FROM Course C JOIN Course_Schedule S ON C.course_id = S.course_id WHERE S.room_id = '[ROOM_ID]'"
+    },
+    {
+      "id": "credits_to_courses",
+      "question": "単位数が [CREDITS] の授業を教えて",
+      "sql": "SELECT course_id, title, credits FROM Course WHERE credits = [CREDITS]"
+    },
+    {
+      "id": "format_to_courses",
+      "question": "[FORMAT]の授業を教えて",
+      "sql": "SELECT course_id, title, format FROM Course WHERE format LIKE '%[FORMAT]%'"
+    },
+    {
+      "id": "evaluation_to_courses",
+      "question": "[EVAL_ITEM]が評価方法に含まれる授業を教えて",
+      "sql": "SELECT DISTINCT C.course_id, C.title, E.evaluation_item, E.weight_percentage FROM Course C JOIN Evaluation_Method E ON C.course_id = E.course_id WHERE E.evaluation_item LIKE '%[EVAL_ITEM]%'"
+    },
+    {
+      "id": "faculty_to_courses",
+      "question": "[FACULTY]の学生が履修できる授業を教えて",
+      "sql": "SELECT course_id, title, faculty_id__target FROM Course WHERE faculty_id__target LIKE '%[FACULTY]%'"
+    }
+  ]
+}

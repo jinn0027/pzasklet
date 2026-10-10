@@ -98,20 +98,35 @@ class CourseSimilarityNormalizer:
         return results[:k]
 
 
-def load_templates(json_path="query_templates3.json"):
+def load_templates(json_path="query_templates3.json") -> List[Dict[str, Any]]:
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"テンプレートファイル '{json_path}' が見つかりません。")
     with open(json_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        raw_data = json.load(f)
+    
+    # 新しいメタデータ付きフォーマット（dict型で "templates" キーを持つ場合）に対応
+    if isinstance(raw_data, dict):
+        return raw_data.get("templates", [])
+    return raw_data
 
 def init_db():
     conn = sqlite3.connect(':memory:')
     csv_files = ['Course.csv', 'Course_Schedule.csv', 'Evaluation_Method.csv', 'Room.csv', 'User.csv']
+    
+    print("\n[DEBUG] データベーステーブルおよびカラム構造:")
     for file in csv_files:
         if os.path.exists(file):
             table_name = os.path.splitext(file)[0]
             df = pd.read_csv(file, skiprows=[1, 2])
             df.to_sql(table_name, conn, if_exists='replace', index=False)
+            
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table_name});")
+            columns = [row[1] for row in cursor.fetchall()]
+            print(f"  - テーブル名: {table_name}")
+            print(f"    カラム: {columns}")
+            
+    print("-" * 50)
     return conn
 
 def render_template(template_entry: dict, slots: dict) -> tuple[str, str]:
@@ -135,7 +150,6 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
         print("-1. 終了（トップに戻る）")
         
         choice = input("番号を選択してください: ").strip()
-        # 💡 空文字または -1 の場合に戻る処理を共通化
         if choice == '' or choice == '-1':
             print("\n--- トップメニューに戻ります ---")
             return
@@ -208,7 +222,6 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
             
             sub_choice = input("番号を選択してください: ").strip()
             
-            # 💡 空文字または -1 の場合に戻る処理を共通化
             if sub_choice == '' or sub_choice == '-1':
                 print("\n--- トップメニューに戻ります ---")
                 return
@@ -364,7 +377,7 @@ def main():
     
     nl_engine = NaturalLanguageSearchEngine(
         conn=conn, 
-        template_dict=template_dict, 
+        templates="query_templates3.json", 
         model_path=model_path,
         device=target_device
     )
@@ -391,7 +404,6 @@ def main():
         
         top_choice = input("番号を選択してください: ").strip()
         
-        # 💡 トップメニューで Enter のみ（空文字）が押された場合もループを回して再表示
         if top_choice == '':
             continue
         
@@ -452,7 +464,7 @@ def main():
             except (ValueError, KeyError, IndexError):
                 print("無効な番号です。")
                 continue
-           
+            
             tmpl = template_dict["room_to_courses"]
             q, sql = render_template(tmpl, {"ROOM_ID": r_val})
             print(f"\n[DEBUG] 自然言語: {q}")
