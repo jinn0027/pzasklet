@@ -66,6 +66,18 @@ class NaturalLanguageSearchEngine:
         elif isinstance(raw_data, list):
             templates_body = {t["id"]: t for t in raw_data if "id" in t}
 
+        # slots 定義がない場合のフォールバック（テンプレートから自動抽出）
+        if not slots_def:
+            extracted_slots = set()
+            for t_info in templates_body.values():
+                q = t_info.get("question", "")
+                sql = t_info.get("sql", "")
+                found = re.findall(r'\[([A-Z_]+)\]', q + " " + sql)
+                for f in found:
+                    if f != "USER_ID":
+                        extracted_slots.add(f)
+            slots_def = {s: f"Automatic slot for {s}" for s in extracted_slots}
+
         return templates_body, slots_def
 
     def _init_vllm(self, model_path: str):
@@ -76,7 +88,7 @@ class NaturalLanguageSearchEngine:
             max_model_len=4096,
         )
         sampling_params = SamplingParams(
-            temperature=0.0,  # 決定論的な抽出を行うため 0.0 に設定
+            temperature=0.0,
             max_tokens=128,
             seed=42,
             repetition_penalty=1.1
@@ -127,22 +139,23 @@ class NaturalLanguageSearchEngine:
         for slot, description in self.slots_definition.items():
             key_name = slot.lower()
             default_json_dict[key_name] = None
-            desc_lines.append(f"- \"{key_name}\": {description}")
+            desc_lines.append(f"- {key_name}: {description}")
         
         json_format_str = json.dumps(default_json_dict, ensure_ascii=False, indent=2)
 
-        # 💡 メタデータ定義に基づいてLLMに確実に抽出させる汎用プロンプト
         prompt = (
-            "You are a precise query parsing assistant for a university course search system.\n"
-            "Analyze the user's question and extract the corresponding slot values into a JSON object.\n\n"
-            "Extraction Rules:\n"
-            "1. Do not translate, normalize, or rephrase extracted values; copy the exact characters or numbers as they appear in the user's question.\n"
-            "2. If a slot value is present in the question, extract it. If not present, set it to null.\n"
-            "3. Output ONLY valid JSON matching the exact schema below, with no conversational filler or extra text.\n\n"
-            "Slots Definition:\n"
+            "あなたは大学の授業検索システムのクエリパーサーです。\n"
+            "ユーザーの質問から検索条件を分析し、以下のJSON形式で抽出してください。\n\n"
+            "【抽出ルール】\n"
+            "1. 下記の【スロット定義】にあるキー名（小文字のキー）をそのままJSONのキーとして使用してください。新しいキーを追加しないでください。\n"
+            "2. 質問文に含まれる値（人名、数字、曜日など）をそのままの文字列で切り出してください。\n"
+            "3. 質問文に該当する条件がないスロットは、すべて `null` にしてください。\n"
+            "4. 「string」などのプレースホルダーや説明文は絶対に出力せず、純粋なJSONオブジェクトのみを出力してください。\n\n"
+            "【スロット定義】\n"
             + "\n".join(desc_lines) + "\n\n"
-            f"User Question: {user_query}\n\n"
-            f"JSON Output Format:\n{json_format_str}"
+            f"ユーザーの質問: {user_query}\n\n"
+            "出力JSONフォーマット:\n"
+            f"{json_format_str}"
         )
         
         try:
@@ -150,37 +163,41 @@ class NaturalLanguageSearchEngine:
             raw_output = outputs[0].outputs[0].text.strip()
             print(f"\n[DEBUG] LLMの出力:\n{raw_output}")
             
-            start_idx = raw_output.find('{')
-            if start_idx == -1:
-                return {}
-                
-            depth = 0
-            in_string = False
-            escape = False
-            end_idx = -1
-            
-            for i in range(start_idx, len(raw_output)):
-                char = raw_output[i]
-                if escape:
+            # 💡 ```json ... ``` ブロックがあれば優先して抽出し、なければ最初の { から探す
+            json_str = None
+            code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_output, re.DOTALL)
+            if code_block_match:
+                json_str = code_block_match.group(1)
+            else:
+                start_idx = raw_output.find('{')
+                if start_idx != -1:
+                    depth = 0
+                    in_string = False
                     escape = False
-                    continue
-                if char == '\\' and in_string:
-                    escape = True
-                    continue
-                if char == '"':
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if char == '{':
-                        depth += 1
-                    elif char == '}':
-                        depth -= 1
-                        if depth == 0:
-                            end_idx = i
-                            break
+                    end_idx = -1
+                    for i in range(start_idx, len(raw_output)):
+                        char = raw_output[i]
+                        if escape:
+                            escape = False
+                            continue
+                        if char == '\\' and in_string:
+                            escape = True
+                            continue
+                        if char == '"':
+                            in_string = not in_string
+                            continue
+                        if not in_string:
+                            if char == '{':
+                                depth += 1
+                            elif char == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end_idx = i
+                                    break
+                    if end_idx != -1:
+                        json_str = raw_output[start_idx:end_idx + 1]
             
-            if end_idx != -1:
-                json_str = raw_output[start_idx:end_idx + 1]
+            if json_str:
                 parsed = json.loads(json_str)
                 return parsed if isinstance(parsed, dict) else {}
             
@@ -205,18 +222,59 @@ class NaturalLanguageSearchEngine:
 
     def process_query(self, user_query: str) -> Tuple[Optional[pd.DataFrame], str]:
         try:
-            # 1. LLMによる条件抽出（完全にメタデータ定義駆動）
+            # 1. LLMによる条件抽出
             parsed_conds = self._parse_query_with_llm(user_query)
             print(f"\n[DEBUG] LLM抽出された生データ: {parsed_conds}")
             
-            # 大文字・小文字の差異を完全に吸収してスロット値にマッピング
+            synonym_map = {
+                "instructor": "INSTRUCTOR_NAME",
+                "teacher": "INSTRUCTOR_NAME",
+                "professor": "INSTRUCTOR_NAME",
+                "name": "INSTRUCTOR_NAME",
+                "day": "DAY_OF_WEEK",
+                "week": "DAY_OF_WEEK",
+                "period": "PERIOD",
+                "time": "PERIOD",
+                "room": "ROOM_ID",
+                "location": "ROOM_ID",
+                "place": "ROOM_ID",
+                "credit": "CREDITS",
+                "credits": "CREDITS",
+                "format": "FORMAT",
+                "eval": "EVAL_ITEM",
+                "evaluation": "EVAL_ITEM",
+                "faculty": "FACULTY",
+                "department": "FACULTY"
+            }
+
             slot_values = {}
             for slot in self.slots_definition.keys():
+                slot_upper = slot.upper()
                 val = None
+                
                 for k, v in parsed_conds.items():
-                    if k.upper() == slot.upper() and v is not None:
+                    if v is not None and str(v).lower() == "string":
+                        continue
+                        
+                    k_lower = k.lower()
+                    k_upper = k.upper()  # 💡 k_upper の定義漏れを修正
+                    
+                    # 1. 完全一致
+                    if k_upper == slot.upper():
                         val = v
                         break
+                        
+                    # 2. シノニムマップを通じた一致判定
+                    mapped_slot = synonym_map.get(k_lower)
+                    if mapped_slot and mapped_slot.upper() == slot_upper:
+                        val = v
+                        break
+                        
+                    # 3. 部分一致
+                    if k_lower in slot.lower() or slot.lower() in k_lower:
+                        val = v
+                        break
+                
                 slot_values[slot] = val
             
             print(f"[DEBUG] マッピングされたスロット値: {slot_values}")
@@ -247,7 +305,6 @@ class NaturalLanguageSearchEngine:
             
             similarities.sort(key=lambda x: x['score'], reverse=True)
             
-            # テンプレートマッチングの上位候補をデバッグ表示
             print("\n[DEBUG] テンプレート類似度マッチング上位候補:")
             for rank, item in enumerate(similarities[:3]):
                 print(f"  [{rank+1}] スコア: {item['score']:.4f} | テンプレート文: {item['question']} (id: {item['id']})")

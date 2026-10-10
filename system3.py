@@ -2,7 +2,8 @@ import pandas as pd
 import os
 import json
 import numpy as np
-from typing import Dict, List, Any, Optional
+import unicodedata
+from typing import Dict, List, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
 from nl_search import NaturalLanguageSearchEngine
 import sqlite3
@@ -98,35 +99,20 @@ class CourseSimilarityNormalizer:
         return results[:k]
 
 
-def load_templates(json_path="query_templates3.json") -> List[Dict[str, Any]]:
+def load_templates(json_path="query_templates3.json"):
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"テンプレートファイル '{json_path}' が見つかりません。")
     with open(json_path, 'r', encoding='utf-8') as f:
-        raw_data = json.load(f)
-    
-    # 新しいメタデータ付きフォーマット（dict型で "templates" キーを持つ場合）に対応
-    if isinstance(raw_data, dict):
-        return raw_data.get("templates", [])
-    return raw_data
+        return json.load(f)
 
 def init_db():
     conn = sqlite3.connect(':memory:')
     csv_files = ['Course.csv', 'Course_Schedule.csv', 'Evaluation_Method.csv', 'Room.csv', 'User.csv']
-    
-    print("\n[DEBUG] データベーステーブルおよびカラム構造:")
     for file in csv_files:
         if os.path.exists(file):
             table_name = os.path.splitext(file)[0]
             df = pd.read_csv(file, skiprows=[1, 2])
             df.to_sql(table_name, conn, if_exists='replace', index=False)
-            
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({table_name});")
-            columns = [row[1] for row in cursor.fetchall()]
-            print(f"  - テーブル名: {table_name}")
-            print(f"    カラム: {columns}")
-            
-    print("-" * 50)
     return conn
 
 def render_template(template_entry: dict, slots: dict) -> tuple[str, str]:
@@ -138,19 +124,80 @@ def render_template(template_entry: dict, slots: dict) -> tuple[str, str]:
         sql = sql.replace(placeholder, str(val))
     return q, sql
 
+
+def resolve_menu_choice(
+    user_input: str, 
+    menu_options: Dict[str, str], 
+    embed_model: Optional[SentenceTransformer] = None
+) -> Tuple[Optional[str], float]:
+    """
+    数字入力を最優先しつつ、日本語や自然言語入力の場合は埋め込みモデルのコサイン類似度で
+    メニューの意図をあいまい判定する汎用関数。
+    """
+    if not user_input:
+        return None, 0.0
+        
+    # 全角英数字を半角に正規化 (例: '０' -> '0', '１' -> '1')
+    raw_norm = unicodedata.normalize('NFKC', user_input).strip()
+    
+    # 1. 数字または負数（-1等）の直接一致判定
+    if raw_norm in menu_options:
+        return raw_norm, 1.0
+        
+    try:
+        val = str(int(raw_norm))
+        if val in menu_options:
+            return val, 1.0
+    except ValueError:
+        pass
+
+    # 2. 埋め込みモデルを用いた自然言語あいまいマッチング
+    if embed_model is not None:
+        try:
+            input_vec = embed_model.encode(raw_norm, convert_to_numpy=True).astype(np.float32)
+            best_key = None
+            best_score = -1.0
+            
+            for key, label in menu_options.items():
+                option_vec = embed_model.encode(label, convert_to_numpy=True).astype(np.float32)
+                
+                norm1 = np.linalg.norm(input_vec)
+                norm2 = np.linalg.norm(option_vec)
+                score = float(np.dot(input_vec, option_vec) / (norm1 * norm2)) if (norm1 > 0 and norm2 > 0) else 0.0
+                
+                if score > best_score:
+                    best_score = score
+                    best_key = key
+                    
+            # 類似度が一定以上（閾値 0.45）であれば採用
+            if best_score >= 0.45:
+                return best_key, best_score
+        except Exception:
+            pass
+
+    return None, 0.0
+
+
 def inspect_course(conn, template_dict, target_course_id, target_title, normalizer):
+    INSPECT_MENU = {
+        "1": "担当の先生",
+        "2": "日時（曜日・時限）",
+        "3": "場所（教室）",
+        "4": "内容（テーマ・概要）",
+        "-1": "終了（トップに戻る）"
+    }
+    
     while True:
         print(f"\n選択された授業: {target_title} ({target_course_id})")
 
         print("\n何を知りたいですか？")
-        print("1. 担当の先生")
-        print("2. 日時（曜日・時限）")
-        print("3. 場所（教室）")
-        print("4. 内容（テーマ・概要）")
-        print("-1. 終了（トップに戻る）")
+        for k, v in INSPECT_MENU.items():
+            print(f"  [{k}] {v}")
         
-        choice = input("番号を選択してください: ").strip()
-        if choice == '' or choice == '-1':
+        raw_input = input("番号を選択してください (数字/日本語入力可): ")
+        choice, _ = resolve_menu_choice(raw_input, INSPECT_MENU, normalizer.model)
+        
+        if choice == '-1':
             print("\n--- トップメニューに戻ります ---")
             return
 
@@ -211,22 +258,28 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
         else:
             print(res.to_string(index=False))
 
+        SUB_MENU = {
+            "1": "担当の先生",
+            "2": "日時（曜日・時限）",
+            "3": "場所（教室）",
+            "4": "内容（テーマ・概要）",
+            "5": "類似の授業一覧を表示する",
+            "-1": "終了（トップに戻る）"
+        }
+
         while True:
             print("\n次のアクションを選んでください:")
-            print("1. 担当の先生")
-            print("2. 日時（曜日・時限）")
-            print("3. 場所（教室）")
-            print("4. 内容（テーマ・概要）")
-            print("5. 類似の授業一覧を表示する")
-            print("-1. 終了（トップに戻る）")
+            for k, v in SUB_MENU.items():
+                print(f"  [{k}] {v}")
             
-            sub_choice = input("番号を選択してください: ").strip()
+            raw_sub = input("番号を選択してください (数字/日本語入力可): ")
+            sub_choice, _ = resolve_menu_choice(raw_sub, SUB_MENU, normalizer.model)
             
-            if sub_choice == '' or sub_choice == '-1':
+            if sub_choice == '-1':
                 print("\n--- トップメニューに戻ります ---")
                 return
             
-            if sub_choice in ['1', '2', '3', '4']:
+            elif sub_choice in ['1', '2', '3', '4']:
                 choice = sub_choice
                 if choice == '1':
                     attr_df = pd.read_sql(f"SELECT U.user_id FROM Course C JOIN User U ON C.user_id__instructor = U.user_id WHERE C.course_id = '{target_course_id}'", conn)
@@ -285,10 +338,9 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
                         print(f"[{rank}] (類似度: {res_item['score']:.4f}) {res_item['course_id']}: {res_item['title']}{marker}")
                     
                     try:
-                        s_input = input("\n気になる授業の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                        if s_input == '' or s_input == '-1':
+                        s_selected_idx = int(input("\n気になる授業の番号を選んでください (戻る場合は -1): "))
+                        if s_selected_idx == -1:
                             continue
-                        s_selected_idx = int(s_input)
                         selected_item = similar_results[s_selected_idx]
                         inspect_course(conn, template_dict, selected_item['course_id'], selected_item['title'], normalizer)
                         return
@@ -323,10 +375,9 @@ def inspect_course(conn, template_dict, target_course_id, target_title, normaliz
                                 print(f"[{s_idx}] {s_row['course_id']}: {s_row['title']}{marker}")
                             
                             try:
-                                s_input = input("\n気になる授業の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                                if s_input == '' or s_input == '-1':
+                                s_selected_idx = int(input("\n気になる授業の番号を選んでください (戻る場合は -1): "))
+                                if s_selected_idx == -1:
                                     continue
-                                s_selected_idx = int(s_input)
                                 selected_sim_row = similar_res.reset_index(drop=True).loc[s_selected_idx]
                                 inspect_course(conn, template_dict, selected_sim_row['course_id'], selected_sim_row['title'], normalizer)
                                 return
@@ -348,10 +399,9 @@ def select_course_from_list(conn, template_dict, normalizer, courses_df):
         print(f"[{idx}] {row['course_id']}: {row['title']}")
     
     try:
-        s_input = input("\n授業の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-        if s_input == '' or s_input == '-1':
+        selected_idx = int(input("\n授業の番号を選んでください (戻る場合は -1): "))
+        if selected_idx == -1:
             return
-        selected_idx = int(s_input)
         selected_row = courses_df.reset_index(drop=True).loc[selected_idx]
         target_course_id = selected_row['course_id']
         target_title = selected_row['title']
@@ -363,12 +413,22 @@ def select_course_from_list(conn, template_dict, normalizer, courses_df):
 
 def main():
     try:
-        query_templates = load_templates("query_templates3.json")
+        query_templates_raw = load_templates("query_templates3.json")
     except Exception as e:
         print(f"エラー: {e}")
         return
 
-    template_dict = {t["id"]: t for t in query_templates}
+    # 💡 辞書型（slots / templates）とリスト型の両方に対応したテンプレート展開
+    template_dict = {}
+    if isinstance(query_templates_raw, dict):
+        body_source = query_templates_raw.get("templates", query_templates_raw)
+        if isinstance(body_source, dict):
+            template_dict = {k: v for k, v in body_source.items() if k not in ["slots"]}
+        elif isinstance(body_source, list):
+            template_dict = {t["id"]: t for t in body_source if "id" in t}
+    elif isinstance(query_templates_raw, list):
+        template_dict = {t["id"]: t for t in query_templates_raw if "id" in t}
+
     conn = init_db()
     print("--- 授業情報検索システム (pzasklet 統合版) ---")
     
@@ -377,7 +437,7 @@ def main():
     
     nl_engine = NaturalLanguageSearchEngine(
         conn=conn, 
-        templates="query_templates3.json", 
+        template_dict=template_dict, 
         model_path=model_path,
         device=target_device
     )
@@ -392,20 +452,23 @@ def main():
         print(f"モデルの初期化またはベクトル生成に失敗しました: {e}")
         return
     
+    TOP_MENU = {
+        "0": "授業一覧から選ぶ",
+        "1": "日時一覧から選んで授業を表示する",
+        "2": "場所一覧から選んで授業を表示する",
+        "3": "先生一覧から選んで授業を表示する",
+        "4": "自由な文章・キーワードで探す (GLuCoSE類似度検索)",
+        "5": "条件を自然言語で指定して探す (テンプレート＋スロット充填)",
+        "-1": "システム終了"
+    }
+
     while True:
         print("\n=== トップメニュー: 検索の切り口を選んでください ===")
-        print("0. 授業一覧から選ぶ")
-        print("1. 日時一覧から選んで授業を表示する")
-        print("2. 場所一覧から選んで授業を表示する")
-        print("3. 先生一覧から選んで授業を表示する")
-        print("4. 自由な文章・キーワードで探す (GLuCoSE類似度検索)")
-        print("5. 条件を自然言語で指定して探す (テンプレート＋スロット充填)")
-        print("-1. システム終了 (または Enter で再表示)")
+        for k, v in TOP_MENU.items():
+            print(f"  [{k}] {v}")
         
-        top_choice = input("番号を選択してください: ").strip()
-        
-        if top_choice == '':
-            continue
+        raw_top_choice = input("番号を選択してください (数字/日本語入力可): ")
+        top_choice, _ = resolve_menu_choice(raw_top_choice, TOP_MENU, normalizer.model)
         
         if top_choice == '-1':
             print("\nシステムを終了します。")
@@ -425,10 +488,9 @@ def main():
                 print(f"[{idx}] 曜日: {row['day_of_week']}, 時限: {row['period']}")
             
             try:
-                s_input = input("\n日時の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                if s_input == '' or s_input == '-1':
+                s_idx = int(input("\n日時の番号を選んでください (戻る場合は -1): "))
+                if s_idx == -1:
                     continue
-                s_idx = int(s_input)
                 sel_sched = schedules_df.reset_index(drop=True).loc[s_idx]
                 d_val = sel_sched['day_of_week']
                 p_val = sel_sched['period']
@@ -455,10 +517,9 @@ def main():
                 print(f"[{idx}] 教室: {row['room_id']} ({row['building_name']})")
             
             try:
-                s_input = input("\n場所の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                if s_input == '' or s_input == '-1':
+                s_idx = int(input("\n場所の番号を選んでください (戻る場合は -1): "))
+                if s_idx == -1:
                     continue
-                s_idx = int(s_input)
                 sel_room = rooms_df.reset_index(drop=True).loc[s_idx]
                 r_val = sel_room['room_id']
             except (ValueError, KeyError, IndexError):
@@ -484,10 +545,9 @@ def main():
                 print(f"[{idx}] {row['last_name']} {row['first_name']} (ID: {row['user_id']})")
             
             try:
-                s_input = input("\n先生の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                if s_input == '' or s_input == '-1':
+                s_idx = int(input("\n先生の番号を選んでください (戻る場合は -1): "))
+                if s_idx == -1:
                     continue
-                s_idx = int(s_input)
                 sel_inst = instructors_df.reset_index(drop=True).loc[s_idx]
                 i_id = sel_inst['user_id']
             except (ValueError, KeyError, IndexError):
@@ -503,8 +563,9 @@ def main():
             select_course_from_list(conn, template_dict, normalizer, courses_res)
 
         elif top_choice == '4':
-            query_text = input("\n検索したい内容（キーワードや文章）を入力してください (戻る場合は Enter): ").strip()
+            query_text = input("\n検索したい内容（キーワードや文章）を入力してください: ").strip()
             if not query_text:
+                print("検索文字列が空です。")
                 continue
             
             results = normalizer.search_by_natural_language(query_text, k=10)
@@ -517,10 +578,9 @@ def main():
                 print(f"[{idx}] (類似度: {res_item['score']:.4f}) {res_item['course_id']}: {res_item['title']}")
             
             try:
-                s_input = input("\n気になる授業の番号を選んでください (戻る場合は -1 または Enter): ").strip()
-                if s_input == '' or s_input == '-1':
+                s_idx = int(input("\n気になる授業の番号を選んでください (戻る場合は -1): "))
+                if s_idx == -1:
                     continue
-                s_idx = int(s_input)
                 selected_item = results[s_idx]
                 inspect_course(conn, template_dict, selected_item['course_id'], selected_item['title'], normalizer)
             except (ValueError, KeyError, IndexError):
@@ -528,8 +588,9 @@ def main():
                 continue
 
         elif top_choice == '5':
-            query_text = input("\n検索条件を自然言語で入力してください（例：月曜 2限、森田先生など / 戻る場合は Enter）: ").strip()
+            query_text = input("\n検索条件を自然言語で入力してください（例：月曜 2限、森田先生など）: ").strip()
             if not query_text:
+                print("入力が空です。")
                 continue
             
             courses_res, message = nl_engine.process_query(query_text)
