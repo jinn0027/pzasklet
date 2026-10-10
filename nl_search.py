@@ -3,6 +3,7 @@ import json
 import re
 import sqlite3
 import datetime
+import difflib
 import numpy as np
 import pandas as pd
 import unicodedata
@@ -136,10 +137,36 @@ class NaturalLanguageSearchEngine:
         desc_lines = []
         default_json_dict = {}
         
+        target_mapping = {
+            "DAY_OF_WEEK": ("Course_Schedule", "day_of_week"),
+            "PERIOD": ("Course_Schedule", "period"),
+            "ROOM_ID": ("Room", "room_id"),
+            "FORMAT": ("Course", "format"),
+            "FACULTY": ("Course", "faculty"),
+        }
+
         for slot, description in self.slots_definition.items():
             key_name = slot.lower()
             default_json_dict[key_name] = None
-            desc_lines.append(f"- {key_name}: {description}")
+            
+            slot_upper = slot.upper()
+            hint_str = ""
+            try:
+                if slot_upper == "INSTRUCTOR_NAME":
+                    df = pd.read_sql("SELECT DISTINCT last_name, user_id FROM User", self.conn)
+                    names = [f"{row['last_name']} ({row['user_id']})" for _, row in df.iterrows() if row['last_name']]
+                    if names:
+                        hint_str = f" [登録例: {', '.join(names[:15])}]"
+                elif slot_upper in target_mapping:
+                    t_name, c_name = target_mapping[slot_upper]
+                    df = pd.read_sql(f"SELECT DISTINCT {c_name} FROM {t_name}", self.conn)
+                    vals = [str(v) for v in df[c_name].dropna().tolist()]
+                    if vals:
+                        hint_str = f" [選択肢例: {', '.join(vals[:15])}]"
+            except Exception:
+                pass
+                
+            desc_lines.append(f"- {key_name}: {description}{hint_str}")
         
         json_format_str = json.dumps(default_json_dict, ensure_ascii=False, indent=2)
 
@@ -148,7 +175,7 @@ class NaturalLanguageSearchEngine:
             "ユーザーの質問から検索条件を分析し、以下のJSON形式で抽出してください。\n\n"
             "【抽出ルール】\n"
             "1. 下記の【スロット定義】にあるキー名（小文字のキー）をそのままJSONのキーとして使用してください。新しいキーを追加しないでください。\n"
-            "2. 質問文に含まれる値（人名、数字、曜日など）をそのままの文字列で切り出してください。\n"
+            "2. 質問文に含まれる値（人名や条件）をそのままの文字列で切り出してください。\n"
             "3. 質問文に該当する条件がないスロットは、すべて `null` にしてください。\n"
             "4. 「string」などのプレースホルダーや説明文は絶対に出力せず、純粋なJSONオブジェクトのみを出力してください。\n\n"
             "【スロット定義】\n"
@@ -206,75 +233,85 @@ class NaturalLanguageSearchEngine:
             return {}
 
     def _resolve_entity(self, slot_name: str, value: Any) -> Any:
-        """スロット値や抽出文字列をデータベース上の実際の値やスキーマに合わせ込む正規化メソッド"""
+        """表（データベース）の実際の値のリストを取得し、大文字小文字を無視して最もフィットする正しい値（ID等）に解決する"""
         if value is None:
             return None
             
         val_str = str(value).strip()
+        val_lower = val_str.lower()
         slot_upper = slot_name.upper()
 
+        target_mapping = {
+            "DAY_OF_WEEK": ("Course_Schedule", "day_of_week"),
+            "PERIOD": ("Course_Schedule", "period"),
+            "ROOM_ID": ("Room", "room_id"),
+            "FORMAT": ("Course", "format"),
+            "FACULTY": ("Course", "faculty"),
+        }
+
         try:
-            # 1. 担当教員 (INSTRUCTOR_NAME / USER_ID)
+            # 1. 担当教員 (INSTRUCTOR_NAME / USER_ID) の解決
             if slot_upper == "INSTRUCTOR_NAME":
-                instructors_df = pd.read_sql("SELECT DISTINCT last_name, user_id FROM User", self.conn)
-                kw_lower = val_str.lower()
-                for _, row in instructors_df.iterrows():
+                df = pd.read_sql("SELECT DISTINCT user_id, last_name, first_name FROM User", self.conn)
+                
+                # ① 大文字小文字を無視した完全一致・部分一致（user_id, last_name, first_name）
+                for _, row in df.iterrows():
                     uid = str(row['user_id'])
-                    last_name = str(row['last_name']).lower()
-                    if (last_name and last_name in kw_lower) or (kw_lower in last_name) or (kw_lower in uid.lower()):
+                    lname = str(row.get('last_name', ''))
+                    fname = str(row.get('first_name', ''))
+                    
+                    if val_lower in uid.lower() or uid.lower() in val_lower:
+                        return uid
+                    if lname and (val_lower in lname.lower() or lname.lower() in val_lower):
+                        return uid
+                    if fname and (val_lower in fname.lower() or fname.lower() in val_lower):
                         return uid
 
-            # 2. 曜日 (DAY_OF_WEEK)
-            elif slot_upper == "DAY_OF_WEEK":
-                sched_df = pd.read_sql("SELECT DISTINCT day_of_week FROM Course_Schedule", self.conn)
-                for _, row in sched_df.iterrows():
-                    db_val = str(row['day_of_week'])
-                    if db_val in val_str or val_str in db_val:
-                        return db_val
-                return val_str.replace("曜日", "").strip()
+                # ② データベース上のすべての名前候補に対するあいまい一致 (difflib)
+                all_candidates = []
+                candidate_to_uid = {}
+                for _, row in df.iterrows():
+                    uid = row['user_id']
+                    for col in ['user_id', 'last_name', 'first_name']:
+                        v = row.get(col)
+                        if v:
+                            s_v = str(v)
+                            all_candidates.append(s_v)
+                            candidate_to_uid[s_v.lower()] = uid
+                
+                matches = difflib.get_close_matches(val_lower, [c.lower() for c in all_candidates], n=1, cutoff=0.3)
+                if matches:
+                    matched_key = matches[0]
+                    if matched_key in candidate_to_uid:
+                        return candidate_to_uid[matched_key]
+                
+                return val_str
 
-            # 3. 時限 (PERIOD)
-            elif slot_upper == "PERIOD":
-                sched_df = pd.read_sql("SELECT DISTINCT period FROM Course_Schedule", self.conn)
-                norm_input = unicodedata.normalize('NFKC', val_str)
-                for _, row in sched_df.iterrows():
-                    db_val = str(row['period'])
-                    if db_val in norm_input:
-                        return row['period']
-                digits = re.findall(r'\d+', norm_input)
-                if digits:
-                    val_int = int(digits[0])
-                    for _, row in sched_df.iterrows():
-                        if str(row['period']) == str(val_int):
-                            return row['period']
-                    return val_int
-
-            # 4. 場所・教室 (ROOM_ID)
-            elif slot_upper == "ROOM_ID":
-                rooms_df = pd.read_sql("SELECT DISTINCT room_id FROM Room", self.conn)
-                for _, row in rooms_df.iterrows():
-                    db_val = str(row['room_id'])
-                    if db_val.lower() in val_str.lower() or val_str.lower() in db_val.lower():
-                        return db_val
-
-            # 5. フォーマット・形式 (FORMAT)
-            elif slot_upper == "FORMAT":
-                formats_df = pd.read_sql("SELECT DISTINCT format FROM Course", self.conn)
-                for _, row in formats_df.iterrows():
-                    db_val = str(row['format'])
-                    if db_val in val_str or val_str in db_val:
-                        return db_val
-
-            # 6. 学部 (FACULTY)
-            elif slot_upper == "FACULTY":
-                fac_df = pd.read_sql("SELECT DISTINCT faculty FROM Course", self.conn)
-                for _, row in fac_df.iterrows():
-                    db_val = str(row['faculty'])
-                    if db_val in val_str or val_str in db_val:
-                        return db_val
+            # 2. 一般的なスロットの解決（テーブル定義に基づく大文字小文字非依存マッチング）
+            if slot_upper in target_mapping:
+                table_name, col_name = target_mapping[slot_upper]
+                df = pd.read_sql(f"SELECT DISTINCT {col_name} FROM {table_name}", self.conn)
+                candidates = df[col_name].dropna().astype(str).tolist()
+                
+                # 小文字化して完全一致
+                cand_lower_map = {c.lower(): c for c in candidates}
+                if val_lower in cand_lower_map:
+                    return cand_lower_map[val_lower]
+                    
+                # 部分一致
+                for cand in candidates:
+                    if cand.lower() in val_lower or val_lower in cand.lower():
+                        return cand
+                        
+                # あいまい一致 (difflib)
+                matches = difflib.get_close_matches(val_lower, [c.lower() for c in candidates], n=1, cutoff=0.3)
+                if matches:
+                    matched_key = matches[0]
+                    if matched_key in cand_lower_map:
+                        return cand_lower_map[matched_key]
 
         except Exception as db_err:
-            print(f"[警告] スロット '{slot_name}' のデータベース解決中のエラー: {db_err}")
+            print(f"[警告] スロット '{slot_name}' のデータベース解決エラー: {db_err}")
 
         return value
 
@@ -330,15 +367,16 @@ class NaturalLanguageSearchEngine:
                         val = v
                         break
                 
-                # データベース解決（SQLに埋め込む用の正式な値に変換）
+                # エンティティ解決（表のデータを用いて正しいIDや値に変換）
                 resolved_val = self._resolve_entity(slot, val)
                 slot_values[slot] = resolved_val
             
             print(f"[DEBUG] マッピング・解決されたスロット値: {slot_values}")
 
-            # 2. クエリの匿名化（マスク処理：元の質問文からLLMが抽出した生の値文字列をそのままプレースホルダーに置換）
+            # 2. クエリの匿名化（マスク処理：大文字小文字を無視して質問文から抽出値をプレースホルダーに置換）
             masked_query = user_query
             norm_masked_query = unicodedata.normalize('NFKC', str(masked_query))
+            norm_masked_lower = norm_masked_query.lower()
             
             for slot in self.slots_definition.keys():
                 slot_upper = slot.upper()
@@ -346,10 +384,14 @@ class NaturalLanguageSearchEngine:
                 
                 if raw_val is not None:
                     norm_raw = unicodedata.normalize('NFKC', str(raw_val))
-                    if norm_raw and norm_raw in norm_masked_query:
-                        norm_masked_query = norm_masked_query.replace(norm_raw, f"[{slot_upper}]")
+                    raw_lower = norm_raw.lower()
+                    
+                    idx = norm_masked_lower.find(raw_lower)
+                    if idx != -1:
+                        masked_query = masked_query[:idx] + f"[{slot_upper}]" + masked_query[idx + len(raw_val):]
+                        norm_masked_query = unicodedata.normalize('NFKC', str(masked_query))
+                        norm_masked_lower = norm_masked_query.lower()
 
-            masked_query = norm_masked_query
             print(f"[DEBUG] 匿名化されたクエリ: {masked_query}")
             
             # 3. マスク済みクエリのベクトル化
