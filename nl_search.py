@@ -5,6 +5,7 @@ import sqlite3
 import datetime
 import numpy as np
 import pandas as pd
+import unicodedata
 from typing import Tuple, Optional, Dict, Any, List, Union
 from sentence_transformers import SentenceTransformer
 
@@ -66,7 +67,6 @@ class NaturalLanguageSearchEngine:
         elif isinstance(raw_data, list):
             templates_body = {t["id"]: t for t in raw_data if "id" in t}
 
-        # slots 定義がない場合のフォールバック（テンプレートから自動抽出）
         if not slots_def:
             extracted_slots = set()
             for t_info in templates_body.values():
@@ -163,7 +163,6 @@ class NaturalLanguageSearchEngine:
             raw_output = outputs[0].outputs[0].text.strip()
             print(f"\n[DEBUG] LLMの出力:\n{raw_output}")
             
-            # 💡 ```json ... ``` ブロックがあれば優先して抽出し、なければ最初の { から探す
             json_str = None
             code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_output, re.DOTALL)
             if code_block_match:
@@ -207,17 +206,76 @@ class NaturalLanguageSearchEngine:
             return {}
 
     def _resolve_entity(self, slot_name: str, value: Any) -> Any:
-        if slot_name == "INSTRUCTOR_NAME" and value:
-            try:
+        """スロット値や抽出文字列をデータベース上の実際の値やスキーマに合わせ込む正規化メソッド"""
+        if value is None:
+            return None
+            
+        val_str = str(value).strip()
+        slot_upper = slot_name.upper()
+
+        try:
+            # 1. 担当教員 (INSTRUCTOR_NAME / USER_ID)
+            if slot_upper == "INSTRUCTOR_NAME":
                 instructors_df = pd.read_sql("SELECT DISTINCT last_name, user_id FROM User", self.conn)
-                kw_lower = str(value).lower()
+                kw_lower = val_str.lower()
                 for _, row in instructors_df.iterrows():
                     uid = str(row['user_id'])
                     last_name = str(row['last_name']).lower()
                     if (last_name and last_name in kw_lower) or (kw_lower in last_name) or (kw_lower in uid.lower()):
                         return uid
-            except Exception as db_err:
-                print(f"[警告] エンティティ解決エラー: {db_err}")
+
+            # 2. 曜日 (DAY_OF_WEEK)
+            elif slot_upper == "DAY_OF_WEEK":
+                sched_df = pd.read_sql("SELECT DISTINCT day_of_week FROM Course_Schedule", self.conn)
+                for _, row in sched_df.iterrows():
+                    db_val = str(row['day_of_week'])
+                    if db_val in val_str or val_str in db_val:
+                        return db_val
+                return val_str.replace("曜日", "").strip()
+
+            # 3. 時限 (PERIOD)
+            elif slot_upper == "PERIOD":
+                sched_df = pd.read_sql("SELECT DISTINCT period FROM Course_Schedule", self.conn)
+                norm_input = unicodedata.normalize('NFKC', val_str)
+                for _, row in sched_df.iterrows():
+                    db_val = str(row['period'])
+                    if db_val in norm_input:
+                        return row['period']
+                digits = re.findall(r'\d+', norm_input)
+                if digits:
+                    val_int = int(digits[0])
+                    for _, row in sched_df.iterrows():
+                        if str(row['period']) == str(val_int):
+                            return row['period']
+                    return val_int
+
+            # 4. 場所・教室 (ROOM_ID)
+            elif slot_upper == "ROOM_ID":
+                rooms_df = pd.read_sql("SELECT DISTINCT room_id FROM Room", self.conn)
+                for _, row in rooms_df.iterrows():
+                    db_val = str(row['room_id'])
+                    if db_val.lower() in val_str.lower() or val_str.lower() in db_val.lower():
+                        return db_val
+
+            # 5. フォーマット・形式 (FORMAT)
+            elif slot_upper == "FORMAT":
+                formats_df = pd.read_sql("SELECT DISTINCT format FROM Course", self.conn)
+                for _, row in formats_df.iterrows():
+                    db_val = str(row['format'])
+                    if db_val in val_str or val_str in db_val:
+                        return db_val
+
+            # 6. 学部 (FACULTY)
+            elif slot_upper == "FACULTY":
+                fac_df = pd.read_sql("SELECT DISTINCT faculty FROM Course", self.conn)
+                for _, row in fac_df.iterrows():
+                    db_val = str(row['faculty'])
+                    if db_val in val_str or val_str in db_val:
+                        return db_val
+
+        except Exception as db_err:
+            print(f"[警告] スロット '{slot_name}' のデータベース解決中のエラー: {db_err}")
+
         return value
 
     def process_query(self, user_query: str) -> Tuple[Optional[pd.DataFrame], str]:
@@ -257,41 +315,47 @@ class NaturalLanguageSearchEngine:
                         continue
                         
                     k_lower = k.lower()
-                    k_upper = k.upper()  # 💡 k_upper の定義漏れを修正
+                    k_upper = k.upper()
                     
-                    # 1. 完全一致
-                    if k_upper == slot.upper():
+                    if k_upper == slot_upper:
                         val = v
                         break
                         
-                    # 2. シノニムマップを通じた一致判定
                     mapped_slot = synonym_map.get(k_lower)
                     if mapped_slot and mapped_slot.upper() == slot_upper:
                         val = v
                         break
                         
-                    # 3. 部分一致
                     if k_lower in slot.lower() or slot.lower() in k_lower:
                         val = v
                         break
                 
-                slot_values[slot] = val
+                # データベース解決（SQLに埋め込む用の正式な値に変換）
+                resolved_val = self._resolve_entity(slot, val)
+                slot_values[slot] = resolved_val
             
-            print(f"[DEBUG] マッピングされたスロット値: {slot_values}")
+            print(f"[DEBUG] マッピング・解決されたスロット値: {slot_values}")
 
-            # 2. 質問文の動的マスク処理（匿名化）
+            # 2. クエリの匿名化（マスク処理：元の質問文からLLMが抽出した生の値文字列をそのままプレースホルダーに置換）
             masked_query = user_query
-            for slot in self.slots_definition.keys():
-                val = slot_values.get(slot)
-                if val and str(val) in masked_query:
-                    masked_query = masked_query.replace(str(val), f"[{slot}]")
+            norm_masked_query = unicodedata.normalize('NFKC', str(masked_query))
             
+            for slot in self.slots_definition.keys():
+                slot_upper = slot.upper()
+                raw_val = parsed_conds.get(slot.lower())
+                
+                if raw_val is not None:
+                    norm_raw = unicodedata.normalize('NFKC', str(raw_val))
+                    if norm_raw and norm_raw in norm_masked_query:
+                        norm_masked_query = norm_masked_query.replace(norm_raw, f"[{slot_upper}]")
+
+            masked_query = norm_masked_query
             print(f"[DEBUG] 匿名化されたクエリ: {masked_query}")
             
             # 3. マスク済みクエリのベクトル化
             query_vec = self.embed_model.encode(masked_query, convert_to_numpy=True).astype(np.float32)
             
-            # 4. 全テンプレートとのコサイン類似度を計算してスコア順に並び替え
+            # 4. 全テンプレートとのコサイン類似度計算
             similarities = []
             for t_id, t_info in self.template_dict.items():
                 t_vec = self.template_embeddings[t_id]
@@ -314,7 +378,7 @@ class NaturalLanguageSearchEngine:
                 self._log_failed_query(user_query, reason)
                 return None, "申し訳ありません。入力された条件から授業を特定できませんでした。「月曜 2限」や先生の名前を指定して再度お試しください。"
             
-            # 5. 上位の候補（最大3つ）を順番に試行
+            # 5. 上位候補を順に試行
             df = None
             filled_sql = ""
             selected_template = None
@@ -331,8 +395,7 @@ class NaturalLanguageSearchEngine:
                 
                 for slot in required_slots_in_tmpl:
                     if slot == "USER_ID":
-                        instructor_val = slot_values.get("INSTRUCTOR_NAME")
-                        resolved_uid = self._resolve_entity("INSTRUCTOR_NAME", instructor_val)
+                        resolved_uid = slot_values.get("INSTRUCTOR_NAME")
                         if not resolved_uid:
                             can_fill = False
                             break
@@ -357,15 +420,10 @@ class NaturalLanguageSearchEngine:
                 try:
                     temp_df = pd.read_sql(current_filled_sql, self.conn)
                     print(f"[DEBUG] 実行結果件数: {len(temp_df)} 件")
-                    if not temp_df.empty:
-                        df = temp_df
-                        filled_sql = current_filled_sql
-                        selected_template = candidate
-                        break
-                    else:
-                        df = temp_df
-                        filled_sql = current_filled_sql
-                        selected_template = candidate
+                    df = temp_df
+                    filled_sql = current_filled_sql
+                    selected_template = candidate
+                    break
                 except Exception as sql_err:
                     print(f"[DEBUG] SQL実行エラー: {sql_err}")
                     continue

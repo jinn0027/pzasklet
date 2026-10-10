@@ -3,6 +3,11 @@ import os
 import json
 import numpy as np
 import unicodedata
+import gc
+import torch
+import sys
+import time
+import subprocess
 from typing import Dict, List, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
 from nl_search import NaturalLanguageSearchEngine
@@ -137,10 +142,8 @@ def resolve_menu_choice(
     if not user_input:
         return None, 0.0
         
-    # 全角英数字を半角に正規化 (例: '０' -> '0', '１' -> '1')
     raw_norm = unicodedata.normalize('NFKC', user_input).strip()
     
-    # 1. 数字または負数（-1等）の直接一致判定
     if raw_norm in menu_options:
         return raw_norm, 1.0
         
@@ -151,7 +154,6 @@ def resolve_menu_choice(
     except ValueError:
         pass
 
-    # 2. 埋め込みモデルを用いた自然言語あいまいマッチング
     if embed_model is not None:
         try:
             input_vec = embed_model.encode(raw_norm, convert_to_numpy=True).astype(np.float32)
@@ -169,7 +171,6 @@ def resolve_menu_choice(
                     best_score = score
                     best_key = key
                     
-            # 類似度が一定以上（閾値 0.45）であれば採用
             if best_score >= 0.45:
                 return best_key, best_score
         except Exception:
@@ -413,21 +414,23 @@ def select_course_from_list(conn, template_dict, normalizer, courses_df):
 
 def main():
     try:
-        query_templates_raw = load_templates("query_templates3.json")
+        raw_templates = load_templates("query_templates3.json")
     except Exception as e:
         print(f"エラー: {e}")
         return
 
-    # 💡 辞書型（slots / templates）とリスト型の両方に対応したテンプレート展開
-    template_dict = {}
-    if isinstance(query_templates_raw, dict):
-        body_source = query_templates_raw.get("templates", query_templates_raw)
+    if isinstance(raw_templates, dict):
+        body_source = raw_templates.get("templates", raw_templates)
         if isinstance(body_source, dict):
             template_dict = {k: v for k, v in body_source.items() if k not in ["slots"]}
         elif isinstance(body_source, list):
             template_dict = {t["id"]: t for t in body_source if "id" in t}
-    elif isinstance(query_templates_raw, list):
-        template_dict = {t["id"]: t for t in query_templates_raw if "id" in t}
+        else:
+            template_dict = {}
+    elif isinstance(raw_templates, list):
+        template_dict = {t["id"]: t for t in raw_templates if "id" in t}
+    else:
+        template_dict = {}
 
     conn = init_db()
     print("--- 授業情報検索システム (pzasklet 統合版) ---")
@@ -459,6 +462,7 @@ def main():
         "3": "先生一覧から選んで授業を表示する",
         "4": "自由な文章・キーワードで探す (GLuCoSE類似度検索)",
         "5": "条件を自然言語で指定して探す (テンプレート＋スロット充填)",
+        "6": "🔄 システムプロセスをリフレッシュ（LLM暴走・エラー復旧）",
         "-1": "システム終了"
     }
 
@@ -601,6 +605,37 @@ def main():
                 continue
             
             select_course_from_list(conn, template_dict, normalizer, courses_res)
+
+        elif top_choice == '6':
+            print("\n🔄 LLMエンジンのリソースを安全に解放し、バックグラウンドワーカーをクリーンアップしています...")
+            if 'nl_engine' in locals() and nl_engine is not None:
+                try:
+                    if hasattr(nl_engine, 'llm') and hasattr(nl_engine.llm, 'llm_engine'):
+                        if hasattr(nl_engine.llm.llm_engine, 'shutdown'):
+                            nl_engine.llm.llm_engine.shutdown()
+                except Exception:
+                    pass
+                del nl_engine
+            
+            gc.collect()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+                
+            # 💡 残存するvLLMワーカープロセスを強制終了してデバイスを確実に解放
+            print("🧹 残存する vLLM / EngineCore プロセスを掃討中...")
+            try:
+                subprocess.run("pkill -9 -f 'VLLM::EngineCore'", shell=True, stderr=subprocess.DEVNULL)
+                subprocess.run("pkill -9 -f 'vllm'", shell=True, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+            print("⏳ ハードウェアコンテキストの完全解放を待機中...")
+            time.sleep(3.0)  # ドライバがデバイスのロックを確実に外すまで待機
+            
+            print("🚀 システムプロセスを再起動します...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
         else:
             print("無効な選択です。もう一度入力してください。")
